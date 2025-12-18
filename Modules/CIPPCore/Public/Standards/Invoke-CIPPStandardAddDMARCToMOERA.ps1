@@ -51,7 +51,10 @@ function Invoke-CIPPStandardAddDMARCToMOERA {
 
         $CurrentInfo = $Domains | ForEach-Object {
             # Get current DNS records that matches _dmarc hostname and TXT type
-            $CurrentRecords = New-GraphGetRequest -scope 'https://admin.microsoft.com/.default' -TenantID $Tenant -Uri "https://admin.microsoft.com/admin/api/Domains/Records?domainName=$($_.Name)" | Select-Object -ExpandProperty DnsRecords | Where-Object { $_.HostName -eq $RecordModel.HostName -and $_.Type -eq $RecordModel.Type }
+            $RecordsResponse = New-GraphGetRequest -scope 'https://admin.microsoft.com/.default' -TenantID $Tenant -Uri "https://admin.microsoft.com/admin/api/Domains/Records?domainName=$($_.Name)"
+            $AllRecords = $RecordsResponse | Select-Object -ExpandProperty DnsRecords
+            $CurrentRecords = $AllRecords | Where-Object { $_.HostName -eq '_dmarc' -and $_.Type -eq 'TXT' }
+            Write-Information "Found $($CurrentRecords.count) DMARC records for domain $($_.Name)"
 
             if ($CurrentRecords.count -eq 0) {
                 #record not found, return a model with Match set to false
@@ -87,15 +90,16 @@ function Invoke-CIPPStandardAddDMARCToMOERA {
                 }
             }
         }
-        # Check if match is true and there is only one DMARC record for the domain
-        $StateIsCorrect = $false -notin $CurrentInfo.Match -and $CurrentInfo.Count -eq 1
+        # Check if match is true and there is only one DMARC record for each domain
+        $StateIsCorrect = $false -notin $CurrentInfo.Match -and $CurrentInfo.Count -eq $Domains.Count
     } catch {
+        $ErrorMessage = Get-CippException -Exception $_
         if ($_.Exception.Message -like '*403*') {
-            $Message = "AddDMARCToMOERA: Insufficient permissions. Please ensure the tenant GDAP relationship includes the 'Domain Name Administrator' role: $(Get-NormalizedError -message $_.Exception.message)"
+            $Message = "AddDMARCToMOERA: Insufficient permissions. Please ensure the tenant GDAP relationship includes the 'Domain Name Administrator' role: $($ErrorMessage.NormalizedError)"
         } else {
-            $Message = "Failed to get dns records for MOERA domains: $(Get-NormalizedError -message $_.Exception.message)"
+            $Message = "Failed to get dns records for MOERA domains: $($ErrorMessage.NormalizedError)"
         }
-        Write-LogMessage -API 'Standards' -tenant $tenant -message $Message -sev Error
+        Write-LogMessage -API 'Standards' -tenant $tenant -message $Message -sev Error -LogData $ErrorMessage
         return $Message
     }
 
@@ -106,16 +110,33 @@ function Invoke-CIPPStandardAddDMARCToMOERA {
             # Loop through each domain and set the DMARC record, existing misconfigured records and duplicates will be deleted
             foreach ($Domain in ($CurrentInfo | Sort-Object -Property DomainName -Unique)) {
                 try {
-                    foreach ($Record in ($CurrentInfo | Where-Object -Property DomainName -EQ $Domain.DomainName)) {
+                    $DomainRecords = @($CurrentInfo | Where-Object -Property DomainName -EQ $Domain.DomainName)
+                    $HasMatchingRecord = $false
+
+                    # First, delete any non-matching records
+                    foreach ($Record in $DomainRecords) {
                         if ($Record.CurrentRecord) {
-                            New-GraphPOSTRequest -tenantid $tenant -scope 'https://admin.microsoft.com/.default' -Uri "https://admin.microsoft.com/admin/api/Domains/Record?domainName=$($Domain.DomainName)" -Body ($Record.CurrentRecord | ConvertTo-Json -Compress) -AddedHeaders @{'x-http-method-override' = 'Delete' }
-                            Write-LogMessage -API 'Standards' -tenant $tenant -message "Deleted incorrect DMARC record for domain $($Domain.DomainName)" -sev Info
+                            if ($Record.Match -eq $false) {
+                                # Delete incorrect record
+                                New-GraphPOSTRequest -tenantid $tenant -scope 'https://admin.microsoft.com/.default' -Uri "https://admin.microsoft.com/admin/api/Domains/Record?domainName=$($Domain.DomainName)" -Body ($Record.CurrentRecord | ConvertTo-Json -Compress) -AddedHeaders @{'x-http-method-override' = 'Delete' }
+                                Write-LogMessage -API 'Standards' -tenant $tenant -message "Deleted incorrect DMARC record for domain $($Domain.DomainName)" -sev Info
+                            } else {
+                                # Record already matches, no need to add
+                                $HasMatchingRecord = $true
+                            }
                         }
+                    }
+
+                    # Only add the record if we don't already have a matching one
+                    if (-not $HasMatchingRecord) {
                         New-GraphPOSTRequest -tenantid $tenant -scope 'https://admin.microsoft.com/.default' -type 'PUT' -Uri "https://admin.microsoft.com/admin/api/Domains/Record?domainName=$($Domain.DomainName)" -Body (@{RecordModel = $RecordModel } | ConvertTo-Json -Compress)
                         Write-LogMessage -API 'Standards' -tenant $tenant -message "Set DMARC record for domain $($Domain.DomainName)" -sev Info
+                    } else {
+                        Write-LogMessage -API 'Standards' -tenant $tenant -message "DMARC record already correctly set for domain $($Domain.DomainName)" -sev Info
                     }
                 } catch {
-                    Write-LogMessage -API 'Standards' -tenant $tenant -message "Failed to set DMARC record for domain $($Domain.DomainName): $(Get-NormalizedError -message $_.Exception.message)" -sev Error
+                    $ErrorMessage = Get-CippException -Exception $_
+                    Write-LogMessage -API 'Standards' -tenant $tenant -message "Failed to set DMARC record for domain $($Domain.DomainName): $($ErrorMessage.NormalizedError)" -sev Error -LogData $ErrorMessage
                 }
             }
         }

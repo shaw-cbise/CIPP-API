@@ -7,9 +7,21 @@ function Invoke-NinjaOneTenantSync {
         $StartQueueTime = Get-Date
         Write-Information "$(Get-Date) - Starting NinjaOne Sync"
 
-        # Stagger start
-        # Check Global Rate Limiting
-        $CurrentMap = Get-ExtensionRateLimit -ExtensionName 'NinjaOne' -ExtensionPartitionKey 'NinjaOneMapping' -RateLimit 5 -WaitTime 10
+        $MappingTable = Get-CIPPTable -TableName CippMapping
+        $CurrentMap = (Get-CIPPAzDataTableEntity @MappingTable -Filter "PartitionKey eq 'NinjaOneMapping'")
+        $CurrentMap | ForEach-Object {
+            if ($Null -ne $_.lastEndTime -and $_.lastEndTime -ne '') {
+                $_.lastEndTime = (Get-Date($_.lastEndTime))
+            } else {
+                $_ | Add-Member -NotePropertyName lastEndTime -NotePropertyValue $Null -Force
+            }
+
+            if ($Null -ne $_.lastStartTime -and $_.lastStartTime -ne '') {
+                $_.lastStartTime = (Get-Date($_.lastStartTime))
+            } else {
+                $_ | Add-Member -NotePropertyName lastStartTime -NotePropertyValue $Null -Force
+            }
+        }
 
         $StartTime = Get-Date
 
@@ -1642,7 +1654,7 @@ function Invoke-NinjaOneTenantSync {
             $ParsedAdmins = [PSCustomObject]@{}
 
             $AdminUsers | Select-Object displayname, userPrincipalName -Unique | ForEach-Object {
-                $ParsedAdmins | Add-Member -NotePropertyName $_.displayname -NotePropertyValue $_.userPrincipalName
+                $ParsedAdmins | Add-Member -NotePropertyName $_.displayname -NotePropertyValue $_.userPrincipalName -Force
             }
 
             $TenantDetailsItems = [PSCustomObject]@{
@@ -1840,7 +1852,7 @@ function Invoke-NinjaOneTenantSync {
                 $StandardsDefinitions = Invoke-RestMethod -Uri 'https://raw.githubusercontent.com/KelvinTegelaar/CIPP/refs/heads/main/src/data/standards.json'
                 $AppliedStandards = Get-CIPPStandards -TenantFilter $Customer.defaultDomainName
                 $Templates = Get-CIPPTable 'templates'
-                $StandardTemplates = Get-CIPPAzDataTableEntity @Templates | Where-Object { $_.PartitionKey -eq 'StandardsTemplateV2' }
+                $StandardTemplates = Get-CIPPAzDataTableEntity @Templates -Filter "PartitionKey eq 'StandardsTemplateV2'"
 
                 $ParsedStandards = foreach ($Standard in $AppliedStandards) {
                     Write-Information "Processing Standard: $($Standard | ConvertTo-Json -Depth 10)"
